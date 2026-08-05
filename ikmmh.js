@@ -643,8 +643,9 @@ function filterReaderImages(images, html) {
 }
 
 function looksLikeReaderSet(images, source) {
-  if (images.length >= 4) return true;
-  return false;
+  // 只要找到至少 1 张候选正文图就视为有效结果；
+  // 旧的 >=4 阈值会让 1~3 张图的章节（如单页番外）被误判并最终报错。
+  return images.length >= 1;
 }
 
 function countLockedReaderPlaceholders(html) {
@@ -715,7 +716,7 @@ class Ikm extends ComicSource {
   // 基础配置
   name = "爱看漫";
   key = "ikmmh";
-  version = "1.0.24";
+  version = "1.0.25";
   minAppVersion = "1.0.0";
   url = "https://cdn.jsdelivr.net/gh/venera-app/venera-configs@main/ikmmh.js";
   // 常量定义
