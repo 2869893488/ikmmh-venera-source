@@ -1,0 +1,75 @@
+name: Guarded auto-merge
+
+on:
+  workflow_run:
+    workflows: ["Repository checks"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  auto-merge:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Merge eligible owner PR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_PULL_REQUESTS: ${{ toJSON(github.event.workflow_run.pull_requests) }}
+          TRUSTED_AUTHOR: "2869893488"
+          DEFAULT_BRANCH: "main"
+        run: |
+          set -euo pipefail
+          count=$(jq 'length' <<< "$RUN_PULL_REQUESTS")
+          [ "$count" = "1" ] || { echo "::notice::No unique PR; skip."; exit 0; }
+          pr_number=$(jq -r '.[0].number // empty' <<< "$RUN_PULL_REQUESTS")
+          [[ "$pr_number" =~ ^[0-9]+$ ]] || exit 1
+
+          pr=$(gh api "repos/$REPOSITORY/pulls/$pr_number")
+          state=$(jq -r '.state' <<< "$pr")
+          draft=$(jq -r '.draft' <<< "$pr")
+          author=$(jq -r '.user.login' <<< "$pr")
+          head_repo=$(jq -r '.head.repo.full_name' <<< "$pr")
+          base=$(jq -r '.base.ref' <<< "$pr")
+          head_sha=$(jq -r '.head.sha' <<< "$pr")
+
+          if [[ "$state" != "open" || "$draft" != "false" ||
+                "$author" != "$TRUSTED_AUTHOR" ||
+                "$head_repo" != "$REPOSITORY" ||
+                "$base" != "$DEFAULT_BRANCH" ||
+                "$head_sha" != "$RUN_HEAD_SHA" ]]; then
+            echo "::notice::PR is not eligible for automatic merge."
+            exit 0
+          fi
+
+          changed=$(jq -r '.changed_files' <<< "$pr")
+          [[ "$changed" =~ ^[0-9]+$ ]] || exit 1
+          if (( changed < 1 || changed > 100 )); then
+            echo "::notice::Unusual changed-file count; manual review required."
+            exit 0
+          fi
+
+          files=$(gh api "repos/$REPOSITORY/pulls/$pr_number/files?per_page=100")
+          [ "$(jq 'length' <<< "$files")" = "$changed" ] || { echo "::notice::Incomplete file list."; exit 0; }
+
+          while IFS= read -r file; do
+            case "$file" in
+              .github/*|.gitmodules)
+                echo "::notice::'$file' changes automation/security configuration; manual merge required."
+                exit 0
+                ;;
+            esac
+          done < <(jq -r '.[].filename' <<< "$files")
+
+          gh pr merge "$pr_number" --repo "$REPOSITORY" --squash --delete-branch --match-head-commit "$RUN_HEAD_SHA"
